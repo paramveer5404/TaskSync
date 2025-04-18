@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>My Google Tasks</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+            color: #333;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 30px;
+        }
+
+        h1 {
+            margin: 0;
+            color: #1a73e8;
+        }
+
+        button {
+            background-color: #1a73e8;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: background-color 0.3s;
+        }
+
+        button:hover {
+            background-color: #0d65d9;
+        }
+
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+
+        .task-list {
+            list-style-type: none;
+            padding: 0;
+        }
+
+        .task-list-container {
+            background-color: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            margin-bottom: 20px;
+        }
+
+        .task-item {
+            padding: 15px;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            align-items: center;
+        }
+
+        .task-item:last-child {
+            border-bottom: none;
+        }
+
+        .task-title {
+            margin: 0 0 5px 0;
+            font-size: 16px;
+            flex-grow: 1;
+        }
+
+        .completed {
+            text-decoration: line-through;
+            color: #888;
+        }
+
+        .checkbox {
+            margin-right: 15px;
+            width: 20px;
+            height: 20px;
+            cursor: pointer;
+        }
+
+        .due-date {
+            color: #888;
+            font-size: 14px;
+            margin-top: 5px;
+        }
+
+        .status {
+            margin-top: 20px;
+            padding: 10px;
+            border-radius: 4px;
+            text-align: center;
+        }
+
+        .loading {
+            background-color: #e8f0fe;
+            color: #1a73e8;
+        }
+
+        .error {
+            background-color: #feeaea;
+            color: #d93025;
+        }
+
+        .no-tasks {
+            text-align: center;
+            color: #888;
+            padding: 30px 0;
+        }
+
+        .task-list-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .task-list-title {
+            margin: 0;
+            color: #444;
+            font-size: 18px;
+            font-weight: 500;
+        }
+
+        #login-container {
+            display: flex;
+            justify-content: center;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>My Google Tasks</h1>
+        <button id="signout-button" style="display: none;">Sign Out</button>
+    </header>
+
+    <div id="content">
+        <div id="status" class="status loading">Please sign in to view your tasks.</div>
+        <div id="login-container"></div>
+        <div id="task-lists"></div>
+    </div>
+
+    <script>
+        // Client ID from the Google Developer Console
+        const CLIENT_ID = '757316341256-udn5on2gjpg3q370j1o9eitdfcg0q5o1.apps.googleusercontent.com';
+        // Scope required for read-only access to Google Tasks
+        const SCOPES = 'https://www.googleapis.com/auth/tasks.readonly';
+
+        // DOM elements
+        const signoutButton = document.getElementById('signout-button');
+        const statusDiv = document.getElementById('status');
+        const taskListsDiv = document.getElementById('task-lists');
+        const loginContainer = document.getElementById('login-container');
+
+        // Authentication tokens and clients
+        let accessToken = null; // We will store the Access Token here
+        let tokenClient; // Google Identity Services Token Client
+
+        /**
+         * Initialize the application once loaded
+         */
+        function init() {
+            // 1. Initialize the GSI Client for sign-in (ID token)
+            google.accounts.id.initialize({
+                client_id: CLIENT_ID,
+                callback: handleCredentialResponse, // This handles the ID token response
+                auto_select: false,
+                cancel_on_tap_outside: true,
+                // No scope here for ID token initialization itself, scope is for the Access Token
+            });
+
+            // 2. Initialize the GSI OAuth2 Client for getting Access Tokens
+            tokenClient = google.accounts.oauth2.initTokenClient({
+                client_id: CLIENT_ID,
+                scope: SCOPES, // Specify the required scope for the Access Token
+                callback: handleAccessTokenResponse // This handles the Access Token response
+            });
+
+            // Render the Sign-in button
+            google.accounts.id.renderButton(
+                loginContainer,
+                {
+                    theme: "outline",
+                    size: "large",
+                    type: "standard",
+                    text: "signin_with",
+                    shape: "rectangular",
+                    logo_alignment: "left",
+                    width: 240
+                }
+            );
+
+            // Check if there's a stored token (Access Token in this case)
+            const storedToken = sessionStorage.getItem('google_access_token');
+            if (storedToken) {
+                accessToken = storedToken;
+                // Immediately try to load tasks with the stored token
+                // Note: Stored client-side tokens might be expired. A more robust app
+                // would check expiration or use a backend+refresh token.
+                onSignInSuccess();
+            } else {
+                 // If no stored token, prompt the user to sign in
+                 // This triggers the ID token flow first.
+                 google.accounts.id.prompt();
+            }
+
+            // Set up signout button
+            signoutButton.addEventListener('click', signOut);
+        }
+
+        /**
+         * Handle Google Identity Services ID token response (after user signs in)
+         * This function is called *after* the user authenticates their identity.
+         * Now we need to get an Access Token to call the API.
+         */
+        function handleCredentialResponse(response) {
+            // response.credential contains the ID token here
+            if (response.credential) {
+                // We don't strictly need the ID token for this app's functionality (only API calls)
+                // but you could decode it here to get user info (name, email, etc.)
+
+                // Now that the user is identified, request the Access Token
+                requestAccessToken();
+            }
+        }
+
+         /**
+         * Request the Access Token using the initialized token client.
+         * This will potentially show a consent dialog to the user asking for
+         * permission for the requested scopes.
+         */
+        function requestAccessToken() {
+            // Request the access token. The callback (handleAccessTokenResponse)
+            // will be called with the token response.
+            tokenClient.requestAccessToken();
+        }
+
+        /**
+         * Handle the Access Token response.
+         * This function is called after the user grants permission for the requested scopes.
+         */
+        function handleAccessTokenResponse(tokenResponse) {
+            if (tokenResponse && tokenResponse.access_token) {
+                accessToken = tokenResponse.access_token;
+                 // Store the Access Token (be mindful of security and expiration in production)
+                sessionStorage.setItem('google_access_token', accessToken);
+                onSignInSuccess(); // Proceed with loading tasks
+            } else {
+                 // Handle cases where the user might have cancelled the permission request
+                 showError('Failed to obtain access token. Please try signing in again.');
+                 console.error('Access Token request failed:', tokenResponse);
+            }
+        }
+
+
+        /**
+         * Actions after successfully obtaining an Access Token
+         */
+        function onSignInSuccess() {
+            loginContainer.style.display = 'none';
+            signoutButton.style.display = 'block';
+            // Clear previous task lists
+            taskListsDiv.innerHTML = '';
+            loadTaskLists();
+        }
+
+        /**
+         * Sign out the user
+         */
+        function signOut() {
+            // Revoke the Access Token (optional but good practice)
+            if (accessToken) {
+                 google.accounts.oauth2.revoke(accessToken, () => {
+                    console.log('Access token revoked.');
+                 });
+            }
+
+            google.accounts.id.disableAutoSelect(); // Disable One-tap
+            sessionStorage.removeItem('google_access_token'); // Clear stored token
+            accessToken = null; // Clear token variable
+
+            // Reset UI
+            loginContainer.style.display = 'flex';
+            signoutButton.style.display = 'none';
+            statusDiv.textContent = 'Please sign in to view your tasks.';
+            statusDiv.style.display = 'block';
+            statusDiv.className = 'status loading';
+            taskListsDiv.innerHTML = ''; // Clear displayed tasks
+        }
+
+        /**
+         * Load task lists using fetch API
+         */
+        function loadTaskLists() {
+            if (!accessToken) {
+                showError('Not signed in or access token missing.');
+                return;
+            }
+
+            statusDiv.textContent = 'Loading your task lists...';
+            statusDiv.className = 'status loading';
+            statusDiv.style.display = 'block';
+
+            fetch('https://tasks.googleapis.com/tasks/v1/users/@me/lists', {
+                headers: {
+                    // Use the Access Token in the Authorization header
+                    'Authorization': 'Bearer ' + accessToken
+                }
+            })
+            .then(response => {
+                if (!response.ok) {
+                    // If it's a 401, likely the token expired or is invalid
+                    if (response.status === 401) {
+                         throw new Error('Authentication failed. Token might be expired or invalid.');
+                    }
+                    throw new Error('Failed to fetch task lists. Status: ' + response.status);
+                }
+                return response.json();
+            })
+            .then(data => {
+                const taskLists = data.items;
+                if (taskLists && taskLists.length > 0) {
+                    statusDiv.style.display = 'none';
+                    taskListsDiv.innerHTML = ''; // Clear previous content
+                    // Process each task list sequentially
+                    processTaskLists(taskLists, 0);
+                } else {
+                    statusDiv.textContent = 'No task lists found.';
+                    statusDiv.className = 'status';
+                    statusDiv.style.display = 'block';
+                }
+            })
+            .catch(error => {
+                console.error('Error loading task lists:', error);
+                if (error.message.includes('Authentication failed') || error.message.includes('401')) {
+                    showError('Authentication failed. Please sign in again.');
+                    signOut(); // Force sign out if token is bad
+                } else {
+                    showError('Failed to load task lists. Check console for details.');
+                }
+            });
+        }
+
+        /**
+         * Process task lists sequentially
+         */
+        function processTaskLists(taskLists, index) {
+            if (index >= taskLists.length) return; // Base case for recursion
+
+            const taskList = taskLists[index];
+
+            // Create container for this task list
+            const taskListContainer = document.createElement('div');
+            taskListContainer.className = 'task-list-container';
+
+            // Add task list header
+            const taskListHeader = document.createElement('div');
+            taskListHeader.className = 'task-list-header';
+
+            const taskListTitle = document.createElement('h3');
+            taskListTitle.className = 'task-list-title';
+            taskListTitle.textContent = taskList.title;
+
+            taskListHeader.appendChild(taskListTitle);
+            taskListContainer.appendChild(taskListHeader);
+
+            // Add loading message initially
+            const loadingMsg = document.createElement('div');
+            loadingMsg.className = 'status loading';
+            loadingMsg.textContent = 'Loading tasks...';
+            taskListContainer.appendChild(loadingMsg);
+
+            // Add the container to the DOM
+            taskListsDiv.appendChild(taskListContainer);
+
+            // Load tasks for this task list
+            loadTasks(taskList.id, taskListContainer, () => {
+                // Once done, process the next task list
+                processTaskLists(taskLists, index + 1);
+            });
+        }
+
+        /**
+         * Load tasks for a specific task list
+         */
+        function loadTasks(taskListId, container, callback) {
+             if (!accessToken) {
+                 console.error('Cannot load tasks, access token is missing.');
+                 // Call callback even on error to not block the next list
+                 if (callback) callback();
+                 return;
+            }
+
+            fetch(`https://tasks.googleapis.com/tasks/v1/lists/${taskListId}/tasks?showCompleted=true`, {
+                headers: {
+                     // Use the Access Token here too
+                    'Authorization': 'Bearer ' + accessToken
+                }
+            })
+            .then(response => {
+                // Remove loading message regardless of success/failure
+                 const loadingMsg = container.querySelector('.status.loading');
+                 if (loadingMsg) {
+                    container.removeChild(loadingMsg);
+                 }
+
+                if (!response.ok) {
+                    throw new Error('Failed to fetch tasks. Status: ' + response.status);
+                }
+                return response.json();
+            })
+            .then(data => {
+                const tasks = data.items;
+                if (tasks && tasks.length > 0) {
+                    const taskList = document.createElement('ul');
+                    taskList.className = 'task-list';
+
+                    tasks.forEach(task => {
+                        const taskItem = document.createElement('li');
+                        taskItem.className = 'task-item';
+
+                        // Create checkbox
+                        const checkbox = document.createElement('input');
+                        checkbox.type = 'checkbox';
+                        checkbox.className = 'checkbox';
+                        checkbox.checked = task.status === 'completed';
+                        checkbox.disabled = true; // Read-only mode
+                        taskItem.appendChild(checkbox);
+
+                        // Create task content container
+                        const taskContent = document.createElement('div');
+                        taskContent.className = 'task-content';
+
+                        // Create task title
+                        const taskTitle = document.createElement('div');
+                        taskTitle.className = 'task-title';
+                        if (task.status === 'completed') {
+                            taskTitle.classList.add('completed');
+                        }
+                        taskTitle.textContent = task.title || '(No title)';
+                        taskContent.appendChild(taskTitle);
+
+                        // Add due date if available
+                        if (task.due) {
+                            const dueDate = document.createElement('div');
+                            dueDate.className = 'due-date';
+                            const date = new Date(task.due);
+                             // Use locale-specific date format
+                            dueDate.textContent = `Due: ${date.toLocaleDateString()}`;
+                            taskContent.appendChild(dueDate);
+                        }
+
+                        taskItem.appendChild(taskContent);
+                        taskList.appendChild(taskItem);
+                    });
+
+                    container.appendChild(taskList);
+                } else {
+                    const noTasks = document.createElement('div');
+                    noTasks.className = 'no-tasks';
+                    noTasks.textContent = 'No tasks in this list.';
+                    container.appendChild(noTasks);
+                }
+
+                // Call the callback to process the next task list
+                if (callback) callback();
+            })
+            .catch(error => {
+                console.error('Error loading tasks:', error);
+
+                // Add error message
+                const errorMsg = document.createElement('div');
+                errorMsg.className = 'status error';
+                errorMsg.textContent = 'Failed to load tasks for this list.';
+                container.appendChild(errorMsg);
+
+                // Call the callback to process the next task list
+                if (callback) callback();
+            });
+        }
+
+        /**
+         * Show error message in the main status area
+         */
+        function showError(message) {
+            statusDiv.textContent = message;
+            statusDiv.className = 'status error';
+            statusDiv.style.display = 'block';
+        }
+    </script>
+
+    <script src="https://accounts.google.com/gsi/client" async defer onload="init()"></script>
+
+</body>
+</html>
